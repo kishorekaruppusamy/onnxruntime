@@ -207,7 +207,7 @@ try:
                     "libnuma.so.1",
                     "libamd_comgr.so.2",
                     "libdrm.so.2",
-                    "librocblas.so.0",
+                    "librocblas.so.3",
                     "libdrm_amdgpu.so.1",
                     "libamdhip64.so.5",
                     "libroctracer64.so.4",
@@ -216,6 +216,10 @@ try:
                     "libelf.so.1",
                     "librocm_smi64.so.5",
                     "libhsa-runtime64.so.1",
+                    "libmigraphx_c.so.3",
+                    "libmigraphx.so.2",
+                    "libmigraphx_onnx.so.2",
+                    "libmigraphx_tf.so.2",
                 ]
 
                 tensorrt_dependencies = ["libnvinfer.so.8", "libnvinfer_plugin.so.8", "libnvonnxparser.so.8"]
