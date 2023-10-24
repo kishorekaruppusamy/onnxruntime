@@ -273,7 +273,6 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
                                                                                onnxruntime::kRocmExecutionProvider,
                                                                                onnxruntime::kAclExecutionProvider,
                                                                                onnxruntime::kArmNNExecutionProvider,
-                                                                               onnxruntime::kArmNNExecutionProvider,
                                                                                onnxruntime::kJsExecutionProvider};
 
 #ifdef MLAS_TARGET_AMD64_IX86
