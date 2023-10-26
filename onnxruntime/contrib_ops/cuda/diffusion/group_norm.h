@@ -11,12 +11,19 @@ namespace cuda {
 
 using namespace onnxruntime::cuda;
 
+enum GroupNormOperatorType {
+  GroupNormOp,
+  SkipGroupNormOp,
+  BiasGroupNormOp
+};
+
+template<GroupNormOperatorType opType>
 class GroupNorm final : public CudaKernel {
  public:
   GroupNorm(const OpKernelInfo& op_kernel_info);
   Status ComputeInternal(OpKernelContext* context) const override;
 
- private:
+ protected:
   bool use_swish_activation_;
   float epsilon_;
   int num_groups_;

@@ -13,7 +13,15 @@ namespace cuda {
 
 ONNX_OPERATOR_KERNEL_EX(
     GroupNorm, kMSDomain, 1, kCudaExecutionProvider,
-    (*KernelDefBuilder::Create()).TypeConstraint("T", BuildKernelDefConstraints<GROUP_NORM_TYPES>()), GroupNorm);
+    (*KernelDefBuilder::Create()).TypeConstraint("T", BuildKernelDefConstraints<GROUP_NORM_TYPES>()), GroupNorm<GroupNormOp>);
+
+ONNX_OPERATOR_KERNEL_EX(
+    SkipGroupNorm, kMSDomain, 1, kCudaExecutionProvider,
+    (*KernelDefBuilder::Create()).TypeConstraint("T", BuildKernelDefConstraints<GROUP_NORM_TYPES>()), GroupNorm<SkipGroupNormOp>);
+
+ONNX_OPERATOR_KERNEL_EX(
+    BiasGroupNorm, kMSDomain, 1, kCudaExecutionProvider,
+    (*KernelDefBuilder::Create()).TypeConstraint("T", BuildKernelDefConstraints<GROUP_NORM_TYPES>()), GroupNorm<BiasGroupNormOp>);
 
 using namespace ONNX_NAMESPACE;
 
@@ -22,7 +30,10 @@ template <typename T>
 struct DispatchGroupNorm {
   Status operator()(cudaStream_t stream,
                     Tensor* output,
+                    Tensor* add_out,
                     const Tensor* input,
+                    const Tensor* skip,
+                    const Tensor* bias,
                     const Tensor* gamma,
                     const Tensor* beta,
                     void* workspace,
@@ -37,7 +48,10 @@ struct DispatchGroupNorm {
     return LaunchGroupNormKernel<CudaT>(
         stream,
         reinterpret_cast<CudaT*>(output->MutableData<T>()),
+        add_out == nullptr ? nullptr : reinterpret_cast<CudaT*>(add_out->MutableData<T>()),
         reinterpret_cast<const CudaT*>(input->Data<T>()),
+        skip == nullptr ? nullptr : reinterpret_cast<const CudaT*>(skip->Data<T>()),
+        bias == nullptr ? nullptr : reinterpret_cast<const CudaT*>(bias->Data<T>()),
         gamma->Data<float>(),
         beta->Data<float>(),
         workspace,
@@ -53,7 +67,8 @@ struct DispatchGroupNorm {
 
 }  // namespace
 
-GroupNorm::GroupNorm(const OpKernelInfo& op_info) : CudaKernel(op_info) {
+template<GroupNormOperatorType T>
+GroupNorm<T>::GroupNorm(const OpKernelInfo& op_info) : CudaKernel(op_info) {
   epsilon_ = op_info.GetAttrOrDefault<float>("epsilon", 1e-5f);
   ORT_ENFORCE(epsilon_ >= 0);
 
@@ -70,7 +85,8 @@ GroupNorm::GroupNorm(const OpKernelInfo& op_info) : CudaKernel(op_info) {
   channels_last_ = (op_info.GetAttrOrDefault<int64_t>("channels_last", static_cast<int64_t>(1)) != 0);
 }
 
-Status GroupNorm::ComputeInternal(OpKernelContext* context) const {
+template<GroupNormOperatorType T>
+Status GroupNorm<T>::ComputeInternal(OpKernelContext* context) const {
   const Tensor* input = context->Input<Tensor>(0);
   const Tensor* gamma = context->Input<Tensor>(1);
   const Tensor* beta = context->Input<Tensor>(2);
@@ -125,10 +141,24 @@ Status GroupNorm::ComputeInternal(OpKernelContext* context) const {
     });
   }
 
-  auto workspace = GetScratchBuffer<void>(GetGroupNormWorkspaceSizeInBytes(), context->GetComputeStream());
+  const Tensor* skip = nullptr;
+  const Tensor* bias = nullptr;
+  Tensor* add_out = nullptr;
+
+  if (T == SkipGroupNormOp) {
+    bias = context->Input<Tensor>(3);
+    skip = context->Input<Tensor>(4);
+    add_out = context->Output(1, input->Shape());
+  } else if (T == BiasGroupNormOp) {
+    bias = context->Input<Tensor>(3);
+  }
+
+  auto workspace = GetScratchBuffer<void>(GetGroupNormWorkspaceSizeInBytes(batch_size, num_groups_),
+                                          context->GetComputeStream());
 
   utils::MLTypeCallDispatcher<GROUP_NORM_TYPES> dispatcher(input->GetElementType());
-  return dispatcher.InvokeRet<Status, DispatchGroupNorm>(Stream(context), output, input, gamma, beta, workspace.get(),
+  return dispatcher.InvokeRet<Status, DispatchGroupNorm>(Stream(context), output, add_out, input, skip, bias,
+                                                         gamma, beta, workspace.get(),
                                                          epsilon_,
                                                          batch_size,
                                                          num_channels,
