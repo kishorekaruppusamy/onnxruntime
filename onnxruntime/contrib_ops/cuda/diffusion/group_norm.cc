@@ -67,7 +67,7 @@ struct DispatchGroupNorm {
 
 }  // namespace
 
-template<GroupNormOperatorType T>
+template <GroupNormOperatorType T>
 GroupNorm<T>::GroupNorm(const OpKernelInfo& op_info) : CudaKernel(op_info) {
   epsilon_ = op_info.GetAttrOrDefault<float>("epsilon", 1e-5f);
   ORT_ENFORCE(epsilon_ >= 0);
@@ -85,7 +85,7 @@ GroupNorm<T>::GroupNorm(const OpKernelInfo& op_info) : CudaKernel(op_info) {
   channels_last_ = (op_info.GetAttrOrDefault<int64_t>("channels_last", static_cast<int64_t>(1)) != 0);
 }
 
-template<GroupNormOperatorType T>
+template <GroupNormOperatorType T>
 Status GroupNorm<T>::ComputeInternal(OpKernelContext* context) const {
   const Tensor* input = context->Input<Tensor>(0);
   const Tensor* gamma = context->Input<Tensor>(1);
@@ -103,26 +103,6 @@ Status GroupNorm<T>::ComputeInternal(OpKernelContext* context) const {
                            "input is expected to have 4 dimensions, got ", input_dims.size());
   }
 
-  const auto& gamma_dims = gamma->Shape().GetDims();
-  if (gamma_dims.size() != 1) {
-    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
-                           "gamma is expected to have 1 dimension, got ", gamma_dims.size());
-  }
-  if (gamma_dims[0] != input_dims[3]) {
-    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
-                           "Number of channels in gamma and input does not match");
-  }
-
-  const auto& beta_dims = beta->Shape().GetDims();
-  if (beta_dims.size() != 1) {
-    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
-                           "beta is expected to have 1 dimension, got ", beta_dims.size());
-  }
-  if (beta_dims[0] != input_dims[3]) {
-    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
-                           "Number of channels in beta and input does not match");
-  }
-
   // Input and output format is NHWC
   int batch_size = static_cast<int>(input_dims[0]);
   int num_channels = static_cast<int>(input_dims[3]);
@@ -132,6 +112,26 @@ Status GroupNorm<T>::ComputeInternal(OpKernelContext* context) const {
   if (num_channels % num_groups_ != 0) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
                            "number of channels should be divisiable by num_groups");
+  }
+
+  const auto& gamma_dims = gamma->Shape().GetDims();
+  if (gamma_dims.size() != 1) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "gamma is expected to have 1 dimension, got ", gamma_dims.size());
+  }
+  if (gamma_dims[0] != num_channels) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "Number of channels in gamma and input does not match");
+  }
+
+  const auto& beta_dims = beta->Shape().GetDims();
+  if (beta_dims.size() != 1) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "beta is expected to have 1 dimension, got ", beta_dims.size());
+  }
+  if (beta_dims[0] != num_channels) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "Number of channels in beta and input does not match");
   }
 
   if (context->GetUseDeterministicCompute()) {
@@ -149,8 +149,39 @@ Status GroupNorm<T>::ComputeInternal(OpKernelContext* context) const {
     bias = context->Input<Tensor>(3);
     skip = context->Input<Tensor>(4);
     add_out = context->Output(1, input->Shape());
+
+    // For SkipGroupNorm, bias has shape (C)
+    const auto& bias_dims = bias->Shape().GetDims();
+    if (bias_dims.size() != 1) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                             "bias is expected to have 1 dimension, got ", bias_dims.size());
+    }
+    if (bias_dims[0] != num_channels) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                             "Number of channels in bias and input does not match");
+    }
+
+    if (skip->Shape() != input->Shape()) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                             "skip is expected to have same shape as input");
+    }
   } else if (T == BiasGroupNormOp) {
     bias = context->Input<Tensor>(3);
+
+    // For BiasGroupNorm, bias has shape (N, C)
+    const auto& bias_dims = bias->Shape().GetDims();
+    if (bias_dims.size() != 2) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                             "bias is expected to have 2 dimension, got ", bias_dims.size());
+    }
+    if (bias_dims[0] != num_channels) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                             "First dimension (batch size) in bias and input does not match");
+    }
+    if (bias_dims[1] != num_channels) {
+      return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                             "Number of channels in bias and input does not match");
+    }
   }
 
   auto workspace = GetScratchBuffer<void>(GetGroupNormWorkspaceSizeInBytes(batch_size, num_groups_),

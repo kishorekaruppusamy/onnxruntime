@@ -17,7 +17,7 @@ enum GroupNormOperatorType {
   BiasGroupNormOp
 };
 
-template<GroupNormOperatorType opType>
+template <GroupNormOperatorType opType>
 class GroupNorm final : public CudaKernel {
  public:
   GroupNorm(const OpKernelInfo& op_kernel_info);

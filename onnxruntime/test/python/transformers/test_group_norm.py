@@ -180,13 +180,12 @@ def run_parity(config, measure_latency=True):
         " G:",
         config.num_groups,
         " activation:",
-        config.activation,
+        int(config.activation),
         " channels_last:",
-        config.channels_last,
+        int(config.channels_last),
         " fp16:",
-        config.fp16,
-        " Latency(ms):",
-        latency * 1000 if isinstance(latency, float) else latency,
+        int(config.fp16),
+        f" Latency(ms): {latency * 1000}" if isinstance(latency, float) else "",
         " AvgDiff:",
         numpy.mean(numpy.abs(ort_result - torch_result)),
         " Pass:",
@@ -250,6 +249,23 @@ def run_odd_channels(fp16, measure_latency=True):
             run_parity(config, measure_latency=measure_latency)
 
 
+def run_small_inputs():
+    # Test small number of N, H, W, C
+    config = GroupNormConfig(2, 2, 2, 16, fp16=True, activation=False, num_groups=4)
+    run_parity(config, measure_latency=False)
+
+    config.fp16 = False
+    config.activation = True
+    run_parity(config, measure_latency=False)
+
+    config = GroupNormConfig(1, 1, 1, 64, fp16=True, activation=False)
+    run_parity(config, measure_latency=False)
+
+    config.fp16 = False
+    config.activation = True
+    run_parity(config, measure_latency=False)
+
+
 def run_performance(fp16):
     # Run perf test to tune parameters for given number of channels.
     for h, w in get_latent_height_width()[2:3]:
@@ -260,6 +276,8 @@ def run_performance(fp16):
 
 def run_all():
     run_performance(True)
+
+    run_small_inputs()
 
     measure_latency = False
     run_odd_channels(True, measure_latency=measure_latency)

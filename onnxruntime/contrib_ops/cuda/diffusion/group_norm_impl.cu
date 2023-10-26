@@ -262,7 +262,7 @@ __global__ void groupNormNHWCSumKernel(GroupNormNHWCParams<T> params) {
   // We have 3 operators:
   // (1) SkipGroupNorm: skip is (n, h, w, c) and bias is (c), add_out is (n, h, w, c)
   //     The additional output add_out = src + skip + bias.
-  // (2) BiasGroupNorm: bias is (n, 1, 1, c), add_out and skip are empty
+  // (2) BiasGroupNorm: bias is (n, c), add_out and skip are empty
   // (3) GroupNorm:  skip, bias and add_out not exists
 
   int64_t offset = static_cast<int64_t>(ni) * params.hwc + static_cast<int64_t>(hwBegin) * params.c + ci;
@@ -282,8 +282,9 @@ __global__ void groupNormNHWCSumKernel(GroupNormNHWCParams<T> params) {
     }
   }
 
-  // The group that thread works on and the channel in the group (modulus).
+  // The group index relative to the first group within the same block.
   int32_t gi = threadIdx.x * CHANNELS_PER_THREAD / params.cPerGroup;
+  // The channel in the group.
   int32_t cj = ci % params.cPerGroup;
 
   // The data for the summations.
@@ -294,27 +295,21 @@ __global__ void groupNormNHWCSumKernel(GroupNormNHWCParams<T> params) {
   BlockScan(tempStorage).InclusiveScan(inp, out, GroupSumsOp());
 
   // Store the results for the groups in shared memory (to produce coalesced stores later).
-  if (cj == params.cPerGroup - CHANNELS_PER_THREAD) {
+  // For each group, only the last thread of that group is picked to save sum to shared memory and update red buffer.
+  const bool is_last_of_a_group = (cj == params.cPerGroup - CHANNELS_PER_THREAD);
+  if (is_last_of_a_group) {
     smem[gi] = make_float2(out.sum, out.sumSq);
   }
 
   // Make sure the data is in shared memory.
   __syncthreads();
 
-  // The global group index.
-  int32_t gj = blockIdx.x * params.groupsPerBlock + threadIdx.x;
-
-  // Threads that have nothing left to do, exit.
-  if (threadIdx.x >= params.groupsPerBlock || gj >= params.groups) {
-    return;
+  if (is_last_of_a_group) {
+    int32_t gj = ci / params.cPerGroup;  // absolute group index
+    float2 sums = smem[gi];
+    atomicAdd(&params.redBuffer[(2 * ni + 0) * params.groups + gj], sums.x);
+    atomicAdd(&params.redBuffer[(2 * ni + 1) * params.groups + gj], sums.y);
   }
-
-  // The first threads (those storing to global memory, load the values).
-  float2 sums = smem[threadIdx.x];
-
-  // Store to global memory.
-  atomicAdd(&params.redBuffer[(2 * ni + 0) * params.groups + gj], sums.x);
-  atomicAdd(&params.redBuffer[(2 * ni + 1) * params.groups + gj], sums.y);
 }
 
 template <typename T>
@@ -409,7 +404,7 @@ template <typename T>
 __global__ void groupNormNHWCScaleKernel(GroupNormNHWCParams<T> params) {
   // The channel loaded by that thread.
   int32_t ci = blockIdx.x * params.cPerBlock + threadIdx.x * CHANNELS_PER_THREAD;
-  if (ci >= params.c) {
+  if (ci >= params.c || threadIdx.x * CHANNELS_PER_THREAD >= params.cPerBlock) {
     return;
   }
 
@@ -435,7 +430,7 @@ __global__ void groupNormNHWCScaleKernel(GroupNormNHWCParams<T> params) {
   // Compute the variance.
   float var = sumSq * params.invHWC - (mean * mean);
   // Compute the inverse of the stddev.
-  float invStdDev = var <= 0.F ? 1.F : rsqrtf(var + params.epsilon);
+  float invStdDev = rsqrtf(var + params.epsilon);
 
   // The first activation loaded by that block.
   int32_t hwBegin = blockIdx.y * params.hwPerBlock;
@@ -523,6 +518,8 @@ Status LaunchGroupNormKernel(
     bool use_swish_activation) {
   GroupNormNHWCParams<T> params;
 
+  int32_t cPerGroup = num_channels / num_groups;
+
   int32_t cPerBlock;
   switch (num_channels) {
     case 2560:
@@ -553,13 +550,11 @@ Status LaunchGroupNormKernel(
       break;
     default:
       cPerBlock = 320;
-  }
-
-  // Find a maximum cPerBlock that num_channels could be divisible by it.
-  // Try to be close to 512 since we have multiple kSizes values are within [256, 512] range that could act as fallback.
-  int32_t cPerGroup = num_channels / num_groups;
-  if (cPerBlock % cPerGroup != 0) {
-    cPerBlock = findMaxDivisor(num_groups, kMaxSize / cPerGroup) * cPerGroup;
+      if (num_channels % cPerBlock != 0 || cPerBlock % cPerGroup != 0) {
+        // Find a maximum cPerBlock that num_channels could be divisible by it.
+        // Try to be close to 512 since multiple kSizes values within [256, 512] range could act as fallback.
+        cPerBlock = findMaxDivisor(num_groups, kMaxSize / cPerGroup) * cPerGroup;
+      }
   }
 
   params.withSwish = use_swish_activation;
@@ -578,6 +573,7 @@ Status LaunchGroupNormKernel(
   params.groups = num_groups;
   params.hw = params.h * params.w;
 
+  // This will allocate as many blocks as possible to partition HW.
   constexpr int32_t maxBlocksPerHW = 1024;
   const int32_t blocksPerHW = findMaxDivisor(params.hw, maxBlocksPerHW);
   params.hwPerBlock = divUp(params.hw, blocksPerHW);
@@ -587,9 +583,13 @@ Status LaunchGroupNormKernel(
   params.hwc = params.hw * params.c;
   params.invHWC = 1.F / (float)(params.hw * params.cPerGroup);
   params.groupsPerBlock = cPerBlock / params.cPerGroup;
+  params.epsilon = epsilon;
 
-  // TODO: Update the kernel to support CHANNELS_PER_THREAD==1
-  if (cPerBlock > 512 || (params.cPerGroup % CHANNELS_PER_THREAD != 0)) {
+  // TODO: Update the kernel to support CHANNELS_PER_THREAD==1 and other corner cases
+  if (params.c % params.cPerBlock != 0 ||
+      params.cPerBlock % params.cPerGroup != 0 ||
+      cPerBlock > 512 ||
+      (params.cPerGroup % CHANNELS_PER_THREAD != 0)) {
     printf("n=%d h=%d w=%d c=%d groups=%d hw=%d hwPerBlock=%d cPerBlock=%d cPerGroup=%d\n",
            params.n, params.h, params.w, params.c, params.groups, params.hw, params.hwPerBlock,
            params.cPerBlock, params.cPerGroup);
@@ -598,13 +598,13 @@ Status LaunchGroupNormKernel(
 
   params.threadsPerBlock = nextSize(cPerBlock) / CHANNELS_PER_THREAD;
 
-  cudaMemsetAsync(params.redBuffer, 0, GetGroupNormWorkspaceSizeInBytes(batch_size, num_groups), stream);
+#ifdef DUMP_GROUP_NORM
+  printf("n=%d h=%d w=%d c=%d groups=%d hw=%d hwPerBlock=%d cPerBlock=%d cPerGroup=%d threadsPerBlock=%d\n",
+         params.n, params.h, params.w, params.c, params.groups, params.hw, params.hwPerBlock,
+         params.cPerBlock, params.cPerGroup, params.threadsPerBlock);
+#endif
 
-  // Make sure the values are as we expect.
-  ORT_ENFORCE(params.c % params.cPerBlock == 0);
-
-  // Make sure a group does not span multiple blocks.
-  ORT_ENFORCE(params.cPerBlock % params.cPerGroup == 0);
+  CUDA_RETURN_IF_ERROR(cudaMemsetAsync(params.redBuffer, 0, GetGroupNormWorkspaceSizeInBytes(batch_size, num_groups), stream));
 
   groupNormNHWCSum<T>(params, stream);
   CUDA_RETURN_IF_ERROR(cudaGetLastError());

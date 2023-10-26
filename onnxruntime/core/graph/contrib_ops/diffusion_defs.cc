@@ -111,7 +111,7 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
                "beta",
                "1D beta tensor for normalization with shape (C), where C is number of channels",
                "M")
-       .Input(3,
+        .Input(3,
                "bias",
                "Bias data tensor. Dimensions are (N x C), where N is the batch size and C is the number of channels",
                "T")
@@ -122,7 +122,6 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
         .TypeConstraint("T", {"tensor(float16)", "tensor(float)"}, "Constrain input X, bias and output Y types to float tensors.")
         .TypeConstraint("M", {"tensor(float16)", "tensor(float)"}, "Constrain gamma and beta to float tensors.")
         .TypeAndShapeInferenceFunction(ONNX_NAMESPACE::propagateShapeAndTypeFromFirstInput));
-
 
 constexpr const char* SkipGroupNorm_ver1_doc = R"DOC(
 This operator element-wise adds input x, skip and bias, then apply group normalization and optional activation.
@@ -190,8 +189,8 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
           propagateElemTypeFromInputToOutput(ctx, 0, 0);
           propagateElemTypeFromInputToOutput(ctx, 0, 1);
           if (hasNInputShapes(ctx, 1)) {
-              propagateShapeFromInputToOutput(ctx, 0, 0);
-              propagateShapeFromInputToOutput(ctx, 0, 1);
+            propagateShapeFromInputToOutput(ctx, 0, 0);
+            propagateShapeFromInputToOutput(ctx, 0, 1);
           }
         }));
 
